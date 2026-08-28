@@ -1,9 +1,9 @@
 import streamlit as st
-import sqlite3
-import json
+import requests
 import random
 import string
 import time
+import json
 
 # ============================================================
 # IPL MULTIPLAYER AUCTION
@@ -14,8 +14,6 @@ st.set_page_config(
     page_icon="🏏",
     layout="wide"
 )
-
-DB_FILE = "ipl_auction.db"
 
 STARTING_PURSE = 120
 MAX_SQUAD = 25
@@ -30,7 +28,7 @@ TEAMS = [
 # PLAYERS
 # ============================================================
 
-PLAYERS = [
+RAW_PLAYERS = [
     ("Virat Kohli", "Batsman", 8, 95, "India"),
     ("Rohit Sharma", "Batsman", 6, 91, "India"),
     ("Shubman Gill", "Batsman", 7, 91, "India"),
@@ -48,9 +46,11 @@ PLAYERS = [
     ("Rahul Tripathi", "Batsman", 1, 80, "India"),
     ("Ayush Badoni", "Batsman", 1, 79, "India"),
     ("Sai Sudharsan", "Batsman", 2, 86, "India"),
+
     ("Rishabh Pant", "Wicketkeeper", 8, 92, "India"),
     ("KL Rahul", "Wicketkeeper", 6, 88, "India"),
     ("Sanju Samson", "Wicketkeeper", 5, 88, "India"),
+    ("Ishan Kishan", "Wicketkeeper", 4, 86, "India"),
     ("Jitesh Sharma", "Wicketkeeper", 2, 80, "India"),
     ("Dhruv Jurel", "Wicketkeeper", 2, 82, "India"),
     ("Phil Salt", "Wicketkeeper", 4, 89, "England"),
@@ -124,553 +124,139 @@ PLAYERS = [
     ("Vijaykumar Vyshak", "Bowler", 1, 75, "India"),
 ]
 
-# ============================================================
-# DATABASE
-# ============================================================
-
-def db():
-    con = sqlite3.connect(DB_FILE, timeout=10)
-    con.row_factory = sqlite3.Row
-    return con
-
-
-def setup_database():
-    con = db()
-
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS rooms (
-            room TEXT PRIMARY KEY,
-            host TEXT,
-            started INTEGER DEFAULT 0,
-            player_index INTEGER DEFAULT 0,
-            current_player TEXT,
-            current_bid REAL DEFAULT 0,
-            highest_bidder TEXT,
-            status TEXT DEFAULT 'waiting',
-            message TEXT DEFAULT ''
-        )
-    """)
-
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS teams (
-            room TEXT,
-            team TEXT,
-            owner TEXT,
-            purse REAL DEFAULT 120,
-            squad TEXT DEFAULT '[]',
-            PRIMARY KEY(room, team)
-        )
-    """)
-
-    con.commit()
-    con.close()
-
-
-setup_database()
-
-# ============================================================
-# HELPERS
-# ============================================================
-
-def make_room():
-    chars = string.ascii_uppercase + string.digits
-    while True:
-        code = "".join(random.choice(chars) for _ in range(5))
-        con = db()
-        found = con.execute(
-            "SELECT room FROM rooms WHERE room=?",
-            (code,)
-        ).fetchone()
-        con.close()
-
-        if not found:
-            return code
-
-
-def get_room(room):
-    con = db()
-    row = con.execute(
-        "SELECT * FROM rooms WHERE room=?",
-        (room,)
-    ).fetchone()
-    con.close()
-    return row
-
-
-def get_teams(room):
-    con = db()
-    rows = con.execute(
-        "SELECT * FROM teams WHERE room=? ORDER BY team",
-        (room,)
-    ).fetchall()
-    con.close()
-    return rows
-
-
-def get_team(room, team):
-    con = db()
-    row = con.execute(
-        "SELECT * FROM teams WHERE room=? AND team=?",
-        (room, team)
-    ).fetchone()
-    con.close()
-    return row
-
-
-def get_squad(team_row):
-    return json.loads(team_row["squad"])
-
-
-def overseas_count(squad):
-    return sum(
-        1 for p in squad
-        if p["country"] != "India"
-    )
-
-
-def can_buy(team_row, player):
-    squad = get_squad(team_row)
-
-    if len(squad) >= MAX_SQUAD:
-        return False
-
-    if player["country"] != "India":
-        if overseas_count(squad) >= MAX_OVERSEAS:
-            return False
-
-    return team_row["purse"] >= player["base"]
-
-
-def player_from_json(value):
-    if not value:
-        return None
-    return json.loads(value)
-
-
-def player_to_json(player):
-    return json.dumps(player)
-
-
-def update_room(room, **values):
-    if not values:
-        return
-
-    con = db()
-
-    fields = []
-    params = []
-
-    for key, value in values.items():
-        fields.append(f"{key}=?")
-        params.append(value)
-
-    params.append(room)
-
-    con.execute(
-        f"UPDATE rooms SET {', '.join(fields)} WHERE room=?",
-        params
-    )
-
-    con.commit()
-    con.close()
-
-
-def update_team(room, team, purse=None, squad=None, owner=None):
-    con = db()
-
-    if purse is not None:
-        con.execute(
-            "UPDATE teams SET purse=? WHERE room=? AND team=?",
-            (purse, room, team)
-        )
-
-    if squad is not None:
-        con.execute(
-            "UPDATE teams SET squad=? WHERE room=? AND team=?",
-            (json.dumps(squad), room, team)
-        )
-
-    if owner is not None:
-        con.execute(
-            "UPDATE teams SET owner=? WHERE room=? AND team=?",
-            (owner, room, team)
-        )
-
-    con.commit()
-    con.close()
-
-
-# ============================================================
-# ROOM CREATION
-# ============================================================
-
-def create_room(host_name):
-    room = make_room()
-
-    shuffled = PLAYERS.copy()
-    random.shuffle(shuffled)
-
-    con = db()
-
-    con.execute(
-        """
-        INSERT INTO rooms
-        (room, host, started, player_index, current_player,
-         current_bid, highest_bidder, status, message)
-        VALUES (?, ?, 0, 0, ?, 0, '', 'waiting', '')
-        """,
-        (room, host_name, json.dumps(shuffled))
-    )
-
-    for team in TEAMS:
-        con.execute(
-            """
-            INSERT INTO teams
-            (room, team, owner, purse, squad)
-            VALUES (?, ?, '', 120, '[]')
-            """,
-            (room, team)
-        )
-
-    con.commit()
-    con.close()
-
-    return room
-
-
-# ============================================================
-# START AUCTION
-# ============================================================
-
-def start_auction(room):
-    row = get_room(room)
-
-    if not row:
-        return
-
-    players = json.loads(row["current_player"])
-
-    if len(players) == 0:
-        return
-
-    player = players[0]
-    remaining = players[1:]
-
-    update_room(
-        room,
-        started=1,
-        player_index=1,
-        current_player=json.dumps(player),
-        current_bid=player[2],
-        highest_bidder="",
-        status="auction",
-        message="Auction started!"
-    )
-
-    # Save remaining players in current_player temporarily
-    # using player_index is enough to determine order.
-    con = db()
-
-    # Store player pool separately if not already available.
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS pools (
-            room TEXT PRIMARY KEY,
-            players TEXT
-        )
-    """)
-
-    con.execute(
-        """
-        INSERT OR REPLACE INTO pools(room, players)
-        VALUES (?, ?)
-        """,
-        (room, json.dumps(remaining))
-    )
-
-    con.commit()
-    con.close()
-
-
-# ============================================================
-# POOL
-# ============================================================
-
-def get_pool(room):
-    con = db()
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS pools (
-            room TEXT PRIMARY KEY,
-            players TEXT
-        )
-    """)
-
-    row = con.execute(
-        "SELECT players FROM pools WHERE room=?",
-        (room,)
-    ).fetchone()
-
-    con.close()
-
-    if not row:
-        return []
-
-    return json.loads(row["players"])
-
-
-def save_pool(room, players):
-    con = db()
-
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS pools (
-            room TEXT PRIMARY KEY,
-            players TEXT
-        )
-    """)
-
-    con.execute(
-        """
-        INSERT OR REPLACE INTO pools(room, players)
-        VALUES (?, ?)
-        """,
-        (room, json.dumps(players))
-    )
-
-    con.commit()
-    con.close()
-
-
-# ============================================================
-# NEXT PLAYER
-# ============================================================
-
-def next_player(room):
-
-    pool = get_pool(room)
-
-    if not pool:
-        update_room(
-            room,
-            current_player="",
-            current_bid=0,
-            highest_bidder="",
-            status="finished",
-            message="🎉 AUCTION FINISHED!"
-        )
-        return
-
-    player = pool.pop(0)
-    save_pool(room, pool)
-
-    update_room(
-        room,
-        current_player=json.dumps(player),
-        current_bid=player[2],
-        highest_bidder="",
-        status="auction",
-        message=f"Next player: {player[0]}"
-    )
-
-
-# ============================================================
-# JOIN TEAM
-# ============================================================
-
-def join_team(room, team, username):
-
-    existing = get_team(room, team)
-
-    if not existing:
-        return "Team does not exist."
-
-    if existing["owner"] and existing["owner"] != username:
-        return "❌ This team is already taken."
-
-    # Check whether user already owns another team
-    con = db()
-
-    other = con.execute(
-        """
-        SELECT team FROM teams
-        WHERE room=? AND owner=? AND team!=?
-        """,
-        (room, username, team)
-    ).fetchone()
-
-    con.close()
-
-    if other:
-        return "❌ You already selected a team."
-
-    update_team(
-        room,
-        team,
-        owner=username
-    )
-
-    return f"✅ You are now controlling {team}."
-
-
-# ============================================================
-# BID
-# ============================================================
-
-def place_bid(room, username):
-
-    room_row = get_room(room)
-
-    if not room_row:
-        return
-
-    player = player_from_json(room_row["current_player"])
-
-    if not player:
-        return
-
-    team_row = get_team(room, room_row["highest_bidder"])
-
-    # Find user's team
-    con = db()
-
-    user_team = con.execute(
-        """
-        SELECT * FROM teams
-        WHERE room=? AND owner=?
-        """,
-        (room, username)
-    ).fetchone()
-
-    con.close()
-
-    if not user_team:
-        update_room(
-            room,
-            message="❌ Choose a team first."
-        )
-        return
-
-    if not can_buy(user_team, {
-        "name": player[0],
-        "role": player[1],
-        "base": player[2],
-        "rating": player[3],
-        "country": player[4]
-    }):
-        update_room(
-            room,
-            message="❌ Your team cannot bid on this player."
-        )
-        return
-
-    current_bid = room_row["current_bid"]
-
-    # Bid increment
-    if current_bid < 5:
-        increment = 1
-    elif current_bid < 10:
-        increment = 1
-    else:
-        increment = 2
-
-    new_bid = current_bid + increment
-
-    if new_bid > user_team["purse"]:
-        update_room(
-            room,
-            message="❌ Not enough money in your purse."
-        )
-        return
-
-    update_room(
-        room,
-        current_bid=new_bid,
-        highest_bidder=user_team["team"],
-        message=f"🔥 {user_team['team']} bids ₹{new_bid} Cr!"
-    )
-
-
-# ============================================================
-# SELL
-# ============================================================
-
-def sell_player(room, username):
-
-    room_row = get_room(room)
-
-    if not room_row:
-        return
-
-    player_data = player_from_json(
-        room_row["current_player"]
-    )
-
-    if not player_data:
-        return
-
-    player = {
-        "name": player_data[0],
-        "role": player_data[1],
-        "base": player_data[2],
-        "rating": player_data[3],
-        "country": player_data[4]
+def player_dict(p):
+    return {
+        "name": p[0],
+        "role": p[1],
+        "base": p[2],
+        "rating": p[3],
+        "country": p[4]
     }
 
-    winner = room_row["highest_bidder"]
+# ============================================================
+# SUPABASE CONNECTION
+# ============================================================
 
-    if not winner:
-        update_room(
-            room,
-            message=f"❌ {player['name']} went UNSOLD."
+try:
+    SUPABASE_URL = st.secrets["SUPABASE_URL"]
+    SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
+except Exception:
+    st.error("Supabase secrets are missing.")
+    st.info("Go to Streamlit → App Settings → Secrets.")
+    st.stop()
+
+API_URL = SUPABASE_URL.rstrip("/") + "/rest/v1/auction_rooms"
+
+HEADERS = {
+    "apikey": SUPABASE_KEY,
+    "Authorization": "Bearer " + SUPABASE_KEY,
+    "Content-Type": "application/json",
+    "Prefer": "return=representation"
+}
+
+# ============================================================
+# DATABASE FUNCTIONS
+# ============================================================
+
+def get_room(room_code):
+    try:
+        response = requests.get(
+            API_URL,
+            headers=HEADERS,
+            params={"room_code": f"eq.{room_code}"},
+            timeout=10
         )
-        time.sleep(0.3)
-        next_player(room)
-        return
 
-    team_row = get_team(room, winner)
+        if response.status_code != 200:
+            return None
 
-    if not team_row:
-        return
+        data = response.json()
 
-    squad = get_squad(team_row)
+        if not data:
+            return None
 
-    if not can_buy(team_row, player):
-        update_room(
-            room,
-            message="❌ Winning team cannot complete this purchase."
+        return data[0]
+
+    except Exception:
+        return None
+
+
+def create_room_in_db(room_code, host_name, state):
+    try:
+        response = requests.post(
+            API_URL,
+            headers=HEADERS,
+            json={
+                "room_code": room_code,
+                "host_name": host_name,
+                "game_state": state
+            },
+            timeout=10
         )
-        return
 
-    new_purse = team_row["purse"] - room_row["current_bid"]
+        return response.status_code in [200, 201]
 
-    squad.append(player)
+    except Exception:
+        return False
 
-    update_team(
-        room,
-        winner,
-        purse=new_purse,
-        squad=squad
-    )
 
-    update_room(
-        room,
-        message=(
-            f"🔨 SOLD! {player['name']} → "
-            f"{winner} for ₹{room_row['current_bid']} Cr"
+def save_state(room_code, state):
+    try:
+        response = requests.patch(
+            API_URL,
+            headers=HEADERS,
+            params={"room_code": f"eq.{room_code}"},
+            json={
+                "game_state": state,
+                "updated_at": "now()"
+            },
+            timeout=10
         )
-    )
 
-    time.sleep(0.4)
+        return response.status_code in [200, 204]
 
-    next_player(room)
+    except Exception:
+        return False
+
+
+def new_room_code():
+    chars = string.ascii_uppercase + string.digits
+
+    for _ in range(100):
+        code = "".join(random.choice(chars) for _ in range(5))
+
+        if not get_room(code):
+            return code
+
+    return "".join(random.choice(chars) for _ in range(5))
 
 
 # ============================================================
-# HOST CHECK
+# GAME STATE
 # ============================================================
 
-def is_host(room, username):
-    row = get_room(room)
+def create_game_state():
+    players = [player_dict(p) for p in RAW_PLAYERS]
+    random.shuffle(players)
 
-    return row and row["host"] == username
+    teams = {}
+
+    for team in TEAMS:
+        teams[team] = {
+            "owner": "",
+            "purse": STARTING_PURSE,
+            "squad": []
+        }
+
+    return {
+        "status": "waiting",
+        "players": players,
+        "current_player": None,
+        "current_bid": 0,
+        "highest_bidder": "",
+        "teams": teams,
+        "message": "Waiting for players..."
+    }
 
 
 # ============================================================
@@ -680,42 +266,33 @@ def is_host(room, username):
 if "username" not in st.session_state:
     st.session_state.username = ""
 
-if "room" not in st.session_state:
-    st.session_state.room = ""
-
-# ============================================================
-# HEADER
-# ============================================================
-
-st.title("🏏 IPL MULTIPLAYER AUCTION")
-st.caption(
-    "₹120 Cr Purse • 25 Players • 8 Overseas • Live Room"
-)
+if "room_code" not in st.session_state:
+    st.session_state.room_code = ""
 
 # ============================================================
 # HOME
 # ============================================================
 
-if not st.session_state.room:
+if not st.session_state.room_code:
 
-    st.subheader("👤 Enter your name")
+    st.title("🏏 IPL MULTIPLAYER AUCTION")
+
+    st.markdown(
+        "### ₹120 Cr Purse • 25 Player Squad • Maximum 8 Overseas"
+    )
 
     username = st.text_input(
-        "Player name",
-        placeholder="Example: Harish"
+        "👤 Your name",
+        placeholder="Enter your name"
     )
 
     st.divider()
 
     left, right = st.columns(2)
 
-    # --------------------------------------------------------
-    # CREATE ROOM
-    # --------------------------------------------------------
-
     with left:
 
-        st.header("🎮 Create Room")
+        st.subheader("🎮 Create Room")
 
         if st.button(
             "CREATE NEW ROOM",
@@ -725,22 +302,33 @@ if not st.session_state.room:
             if not username.strip():
                 st.error("Enter your name first.")
             else:
-                room = create_room(username.strip())
 
-                st.session_state.username = username.strip()
-                st.session_state.room = room
+                room_code = new_room_code()
+                state = create_game_state()
 
-                st.rerun()
+                success = create_room_in_db(
+                    room_code,
+                    username.strip(),
+                    state
+                )
 
-    # --------------------------------------------------------
-    # JOIN ROOM
-    # --------------------------------------------------------
+                if success:
+
+                    st.session_state.username = username.strip()
+                    st.session_state.room_code = room_code
+
+                    st.rerun()
+
+                else:
+                    st.error(
+                        "Could not create room. Check Supabase settings."
+                    )
 
     with right:
 
-        st.header("🚪 Join Room")
+        st.subheader("🚪 Join Room")
 
-        room_code = st.text_input(
+        room_code_input = st.text_input(
             "Room code",
             placeholder="Example: A7K2P"
         )
@@ -750,43 +338,50 @@ if not st.session_state.room:
             use_container_width=True
         ):
 
-            room_code = room_code.strip().upper()
-
             if not username.strip():
                 st.error("Enter your name first.")
 
-            elif not room_code:
-                st.error("Enter a room code.")
-
-            elif not get_room(room_code):
-                st.error("❌ Room not found.")
+            elif not room_code_input.strip():
+                st.error("Enter the room code.")
 
             else:
-                st.session_state.username = username.strip()
-                st.session_state.room = room_code
 
-                st.rerun()
+                code = room_code_input.strip().upper()
+                room = get_room(code)
+
+                if not room:
+                    st.error(
+                        "❌ Room not found. Check the room code."
+                    )
+                else:
+
+                    st.session_state.username = username.strip()
+                    st.session_state.room_code = code
+
+                    st.rerun()
 
     st.stop()
 
 # ============================================================
-# ROOM
+# LOAD ROOM
 # ============================================================
 
-room_code = st.session_state.room
-username = st.session_state.username
+ROOM = get_room(st.session_state.room_code)
 
-room = get_room(room_code)
+if not ROOM:
 
-if not room:
-
-    st.error("❌ This room no longer exists.")
+    st.error("❌ Room not found.")
 
     if st.button("Return Home"):
-        st.session_state.room = ""
+        st.session_state.room_code = ""
+        st.session_state.username = ""
         st.rerun()
 
     st.stop()
+
+room_code = st.session_state.room_code
+username = st.session_state.username
+state = ROOM["game_state"]
 
 # ============================================================
 # SIDEBAR
@@ -794,137 +389,199 @@ if not room:
 
 with st.sidebar:
 
-    st.header("🎮 ROOM")
+    st.title("🏏 IPL AUCTION")
+
+    st.write("Room Code")
 
     st.code(room_code)
 
-    st.write(f"👤 **{username}**")
-
-    if st.button("🚪 Leave Room"):
-        st.session_state.room = ""
-        st.session_state.username = ""
-        st.rerun()
+    st.write(
+        f"👤 **{username}**"
+    )
 
     st.divider()
 
-    st.header("🏏 Teams")
+    st.subheader("👥 Teams")
 
-    teams = get_teams(room_code)
+    for team in TEAMS:
 
-    for team in teams:
-
-        owner = team["owner"]
+        owner = state["teams"][team]["owner"]
 
         if owner:
             st.write(
-                f"🔒 **{team['team']}** — {owner}"
+                f"🔒 {team} — {owner}"
             )
         else:
             st.write(
-                f"🟢 **{team['team']}** — Available"
+                f"🟢 {team} — Available"
             )
+
+    st.divider()
+
+    if st.button("🚪 Leave Room"):
+
+        st.session_state.room_code = ""
+        st.session_state.username = ""
+
+        st.rerun()
 
 # ============================================================
 # WAITING ROOM
 # ============================================================
 
-if room["status"] == "waiting":
+if state["status"] == "waiting":
 
-    st.header("🎮 Waiting Room")
+    st.title("🎮 Waiting Room")
 
     st.success(
-        f"Your room code is **{room_code}**"
+        f"ROOM CODE: **{room_code}**"
     )
-
-    st.markdown(
-        "### 📱 Send this room code to your friends"
-    )
-
-    st.code(room_code)
 
     st.info(
-        "Everyone should open the same Streamlit link, "
-        "enter their name, and join this room."
+        "Send the room code to your friends. "
+        "They must open the same game link and enter this code."
     )
 
     st.divider()
 
-    st.subheader("🏏 Choose your IPL team")
+    st.subheader("🏏 Select Your Team")
 
-    available_teams = [
-        t["team"]
-        for t in teams
-        if not t["owner"]
-    ]
+    my_team = None
 
-    if available_teams:
+    for team in TEAMS:
 
-        selected_team = st.selectbox(
-            "Available teams",
-            available_teams
+        if state["teams"][team]["owner"] == username:
+            my_team = team
+
+    if my_team:
+
+        st.success(
+            f"You control **{my_team}**"
         )
 
-        if st.button(
-            "✅ JOIN SELECTED TEAM",
-            use_container_width=True
-        ):
+    else:
 
-            message = join_team(
-                room_code,
-                selected_team,
-                username
+        available = [
+            team for team in TEAMS
+            if not state["teams"][team]["owner"]
+        ]
+
+        if available:
+
+            selected = st.selectbox(
+                "Choose a team",
+                available
             )
 
-            if message.startswith("❌"):
-                st.error(message)
-            else:
-                st.success(message)
+            if st.button(
+                "✅ JOIN SELECTED TEAM",
+                use_container_width=True
+            ):
 
-            st.rerun()
+                # Make sure the latest state is loaded
+                latest = get_room(room_code)
 
-    else:
-        st.warning("All teams are currently taken.")
+                if latest:
+
+                    latest_state = latest["game_state"]
+
+                    if latest_state["teams"][selected]["owner"]:
+                        st.error(
+                            "❌ Someone already selected that team."
+                        )
+                    else:
+
+                        # Prevent one person from owning two teams
+                        already = False
+
+                        for t in TEAMS:
+                            if latest_state["teams"][t]["owner"] == username:
+                                already = True
+
+                        if already:
+                            st.error(
+                                "❌ You already selected a team."
+                            )
+                        else:
+
+                            latest_state["teams"][selected]["owner"] = username
+
+                            save_state(
+                                room_code,
+                                latest_state
+                            )
+
+                            st.success(
+                                f"You joined {selected}!"
+                            )
+
+                            time.sleep(0.5)
+                            st.rerun()
 
     st.divider()
 
-    st.subheader("👥 Players in room")
+    st.subheader("👥 Players")
 
-    for team in teams:
+    for team in TEAMS:
 
-        if team["owner"]:
+        owner = state["teams"][team]["owner"]
 
+        if owner:
             st.write(
-                f"🏏 **{team['team']}** — "
-                f"{team['owner']}"
+                f"🏏 **{team}** → {owner}"
             )
 
-    # Host controls
-    if is_host(room_code, username):
+    # ========================================================
+    # HOST
+    # ========================================================
+
+    if ROOM["host_name"] == username:
 
         st.divider()
 
         st.subheader("👑 HOST")
 
-        joined = [
-            t for t in teams
-            if t["owner"]
-        ]
-
-        st.write(
-            f"{len(joined)}/10 teams selected"
+        joined = sum(
+            1 for team in TEAMS
+            if state["teams"][team]["owner"]
         )
 
-        if len(joined) >= 1:
+        st.write(
+            f"Teams joined: **{joined}/10**"
+        )
+
+        if joined >= 1:
 
             if st.button(
                 "🚀 START AUCTION",
                 use_container_width=True
             ):
 
-                start_auction(room_code)
-                st.rerun()
+                latest = get_room(room_code)
 
-    # Auto refresh
+                if latest:
+
+                    latest_state = latest["game_state"]
+
+                    if latest_state["players"]:
+
+                        player = latest_state["players"].pop(0)
+
+                        latest_state["current_player"] = player
+                        latest_state["current_bid"] = player["base"]
+                        latest_state["highest_bidder"] = ""
+                        latest_state["status"] = "auction"
+                        latest_state["message"] = (
+                            f"Auction started: {player['name']}"
+                        )
+
+                        save_state(
+                            room_code,
+                            latest_state
+                        )
+
+                        st.rerun()
+
     time.sleep(2)
     st.rerun()
 
@@ -932,228 +589,218 @@ if room["status"] == "waiting":
 # FINISHED
 # ============================================================
 
-if room["status"] == "finished":
+if state["status"] == "finished":
 
-    st.success("🏆 AUCTION FINISHED!")
+    st.title("🏆 AUCTION FINISHED!")
 
-    st.header("📊 FINAL TEAMS")
+    for team in TEAMS:
 
-    teams = get_teams(room_code)
-
-    for team in teams:
-
-        squad = get_squad(team)
+        data = state["teams"][team]
+        squad = data["squad"]
 
         with st.expander(
-            f"🏏 {team['team']} — "
-            f"{len(squad)} players — "
-            f"₹{team['purse']} Cr remaining"
+            f"🏏 {team} | ₹{data['purse']} Cr | "
+            f"{len(squad)}/25 players"
         ):
 
-            if not squad:
-                st.write("No players.")
+            st.write(
+                f"Owner: {data['owner'] or 'No player'}"
+            )
 
-            for p in squad:
+            st.write(
+                f"Overseas: "
+                f"{sum(1 for p in squad if p['country'] != 'India')}/8"
+            )
+
+            for player in squad:
 
                 st.write(
-                    f"• **{p['name']}** — "
-                    f"{p['role']} — "
-                    f"{p['country']}"
+                    f"• {player['name']} — "
+                    f"{player['role']} — "
+                    f"{player['country']}"
                 )
 
     st.stop()
 
 # ============================================================
-# AUCTION
+# AUCTION SCREEN
 # ============================================================
 
-room = get_room(room_code)
+player = state["current_player"]
 
-player_data = player_from_json(
-    room["current_player"]
-)
+if not player:
 
-if not player_data:
-
-    st.warning("Preparing next player...")
+    st.warning("Preparing auction...")
     time.sleep(1)
     st.rerun()
 
-player = {
-    "name": player_data[0],
-    "role": player_data[1],
-    "base": player_data[2],
-    "rating": player_data[3],
-    "country": player_data[4]
-}
-
-# ============================================================
-# PLAYER DISPLAY
-# ============================================================
-
-st.header("🔥 LIVE AUCTION")
+st.title("🔥 LIVE AUCTION")
 
 col1, col2, col3 = st.columns(3)
 
 with col1:
     st.metric(
         "💰 Current Bid",
-        f"₹{room['current_bid']} Cr"
+        f"₹{state['current_bid']} Cr"
     )
 
 with col2:
-    bidder = room["highest_bidder"]
-
     st.metric(
         "👑 Highest Bidder",
-        bidder if bidder else "No bids"
+        state["highest_bidder"] or "No bids"
     )
 
 with col3:
-    pool = get_pool(room_code)
-
     st.metric(
         "📦 Players Remaining",
-        len(pool)
+        len(state["players"])
     )
 
 st.divider()
 
 # ============================================================
-# PLAYER CARD
+# CURRENT PLAYER
 # ============================================================
 
-st.subheader("🏏 CURRENT PLAYER")
+st.header(f"🏏 {player['name']}")
 
-p1, p2 = st.columns([2, 1])
+a, b, c, d = st.columns(4)
 
-with p1:
+with a:
+    st.metric("Role", player["role"])
 
-    st.markdown(
-        f"# {player['name']}"
-    )
+with b:
+    st.metric("Country", player["country"])
 
-    st.write(
-        f"**Role:** {player['role']}"
-    )
+with c:
+    st.metric("⭐ Rating", player["rating"])
 
-    st.write(
-        f"**Country:** {player['country']}"
-    )
-
-with p2:
-
-    st.metric(
-        "⭐ Rating",
-        f"{player['rating']}/100"
-    )
-
+with d:
     st.metric(
         "💵 Base Price",
         f"₹{player['base']} Cr"
     )
 
-# ============================================================
-# MESSAGE
-# ============================================================
-
-if room["message"]:
-
-    st.info(room["message"])
+if state["message"]:
+    st.info(state["message"])
 
 # ============================================================
-# USER TEAM
+# FIND USER TEAM
 # ============================================================
 
-user_team = None
+my_team = None
 
-for team in get_teams(room_code):
+for team in TEAMS:
 
-    if team["owner"] == username:
-        user_team = team
-        break
-
-# ============================================================
-# USER TEAM INFORMATION
-# ============================================================
-
-if user_team:
-
-    squad = get_squad(user_team)
-
-    st.divider()
-
-    st.subheader(
-        f"🏏 YOUR TEAM — {user_team['team']}"
-    )
-
-    a, b, c = st.columns(3)
-
-    with a:
-        st.metric(
-            "💰 Purse",
-            f"₹{user_team['purse']} Cr"
-        )
-
-    with b:
-        st.metric(
-            "👥 Squad",
-            f"{len(squad)}/{MAX_SQUAD}"
-        )
-
-    with c:
-        st.metric(
-            "🌍 Overseas",
-            f"{overseas_count(squad)}/{MAX_OVERSEAS}"
-        )
+    if state["teams"][team]["owner"] == username:
+        my_team = team
 
 # ============================================================
 # BIDDING
 # ============================================================
 
-st.divider()
+if my_team:
 
-if user_team:
+    team_data = state["teams"][my_team]
+    squad = team_data["squad"]
 
-    current_winner = room["highest_bidder"]
+    st.divider()
 
-    if current_winner == user_team["team"]:
+    x, y, z = st.columns(3)
 
-        st.success(
-            "🔥 YOU ARE THE HIGHEST BIDDER!"
+    with x:
+        st.metric(
+            "💰 Your Purse",
+            f"₹{team_data['purse']} Cr"
         )
 
-    bid_disabled = (
-        current_winner == user_team["team"]
-        or not can_buy(user_team, player)
+    with y:
+        st.metric(
+            "👥 Squad",
+            f"{len(squad)}/{MAX_SQUAD}"
+        )
+
+    with z:
+        overseas = sum(
+            1 for p in squad
+            if p["country"] != "India"
+        )
+
+        st.metric(
+            "🌍 Overseas",
+            f"{overseas}/{MAX_OVERSEAS}"
+        )
+
+    overseas_limit = (
+        player["country"] != "India"
+        and overseas >= MAX_OVERSEAS
     )
 
+    squad_limit = len(squad) >= MAX_SQUAD
+
+    if state["current_bid"] < 5:
+        increment = 1
+    elif state["current_bid"] < 10:
+        increment = 1
+    else:
+        increment = 2
+
+    next_bid = state["current_bid"] + increment
+
+    cannot_bid = (
+        state["highest_bidder"] == my_team
+        or team_data["purse"] < next_bid
+        or overseas_limit
+        or squad_limit
+    )
+
+    if state["highest_bidder"] == my_team:
+
+        st.success(
+            "🔥 YOU ARE CURRENTLY THE HIGHEST BIDDER!"
+        )
+
     if st.button(
-        "💰 BID",
-        disabled=bid_disabled,
+        f"💰 BID ₹{next_bid} Cr",
+        disabled=cannot_bid,
         use_container_width=True
     ):
 
-        place_bid(
-            room_code,
-            username
-        )
+        latest = get_room(room_code)
 
-        st.rerun()
+        if latest:
 
-    if current_winner == user_team["team"]:
+            latest_state = latest["game_state"]
 
-        st.warning(
-            "You are currently winning. "
-            "Wait for another player to bid."
-        )
+            latest_player = latest_state["current_player"]
 
-    if not can_buy(user_team, player):
+            if latest_player and latest_player["name"] == player["name"]:
 
-        st.error(
-            "Your team cannot bid on this player "
-            "(purse, squad or overseas limit)."
-        )
+                latest_team = latest_state["teams"][my_team]
+
+                if latest_state["current_bid"] < 5:
+                    inc = 1
+                elif latest_state["current_bid"] < 10:
+                    inc = 1
+                else:
+                    inc = 2
+
+                new_bid = latest_state["current_bid"] + inc
+
+                if latest_team["purse"] >= new_bid:
+
+                    latest_state["current_bid"] = new_bid
+                    latest_state["highest_bidder"] = my_team
+                    latest_state["message"] = (
+                        f"🔥 {my_team} bids ₹{new_bid} Cr!"
+                    )
+
+                    save_state(
+                        room_code,
+                        latest_state
+                    )
+
+                    st.rerun()
 
 else:
 
@@ -1162,19 +809,21 @@ else:
     )
 
 # ============================================================
-# HOST SELL BUTTON
+# HOST CONTROLS
 # ============================================================
 
-if is_host(room_code, username):
+if ROOM["host_name"] == username:
 
     st.divider()
 
-    st.subheader("👑 HOST CONTROLS")
+    st.header("👑 HOST CONTROLS")
 
-    if room["highest_bidder"]:
+    if state["highest_bidder"]:
+
+        winner = state["highest_bidder"]
 
         st.write(
-            f"Highest bidder: **{room['highest_bidder']}**"
+            f"Highest bidder: **{winner}**"
         )
 
         if st.button(
@@ -1182,12 +831,68 @@ if is_host(room_code, username):
             use_container_width=True
         ):
 
-            sell_player(
-                room_code,
-                username
-            )
+            latest = get_room(room_code)
 
-            st.rerun()
+            if latest:
+
+                s = latest["game_state"]
+
+                winning_team = s["highest_bidder"]
+
+                if winning_team:
+
+                    team = s["teams"][winning_team]
+                    sold_price = s["current_bid"]
+                    sold_player = s["current_player"]
+
+                    overseas = sum(
+                        1 for p in team["squad"]
+                        if p["country"] != "India"
+                    )
+
+                    if (
+                        len(team["squad"]) < MAX_SQUAD
+                        and team["purse"] >= sold_price
+                        and (
+                            sold_player["country"] == "India"
+                            or overseas < MAX_OVERSEAS
+                        )
+                    ):
+
+                        team["purse"] -= sold_price
+
+                        team["squad"].append(
+                            sold_player
+                        )
+
+                        if s["players"]:
+
+                            next_p = s["players"].pop(0)
+
+                            s["current_player"] = next_p
+                            s["current_bid"] = next_p["base"]
+                            s["highest_bidder"] = ""
+                            s["message"] = (
+                                f"🔨 SOLD! "
+                                f"{sold_player['name']} → "
+                                f"{winning_team} for "
+                                f"₹{sold_price} Cr"
+                            )
+
+                        else:
+
+                            s["current_player"] = None
+                            s["status"] = "finished"
+                            s["message"] = (
+                                "🏆 AUCTION FINISHED!"
+                            )
+
+                        save_state(
+                            room_code,
+                            s
+                        )
+
+                        st.rerun()
 
     else:
 
@@ -1196,49 +901,74 @@ if is_host(room_code, username):
             use_container_width=True
         ):
 
-            next_player(room_code)
-            st.rerun()
+            latest = get_room(room_code)
+
+            if latest:
+
+                s = latest["game_state"]
+
+                if s["players"]:
+
+                    next_p = s["players"].pop(0)
+
+                    s["current_player"] = next_p
+                    s["current_bid"] = next_p["base"]
+                    s["highest_bidder"] = ""
+                    s["message"] = (
+                        f"{s['current_player']['name']} is up for auction."
+                    )
+
+                else:
+
+                    s["current_player"] = None
+                    s["status"] = "finished"
+                    s["message"] = "🏆 AUCTION FINISHED!"
+
+                save_state(
+                    room_code,
+                    s
+                )
+
+                st.rerun()
 
 # ============================================================
-# ALL TEAMS
+# LIVE TEAM STATUS
 # ============================================================
 
 st.divider()
 
 st.header("📊 LIVE TEAM STATUS")
 
-teams = get_teams(room_code)
+for team_name in TEAMS:
 
-for team in teams:
-
-    squad = get_squad(team)
+    team = state["teams"][team_name]
+    squad = team["squad"]
 
     with st.expander(
-        f"{team['team']} — "
-        f"₹{team['purse']} Cr — "
-        f"{len(squad)}/25 players"
+        f"🏏 {team_name} | "
+        f"₹{team['purse']} Cr | "
+        f"{len(squad)}/25"
     ):
 
-        if team["owner"]:
-            st.write(
-                f"👤 Owner: **{team['owner']}**"
-            )
-        else:
-            st.write("🟢 Computer / available")
-
         st.write(
-            f"🌍 Overseas: "
-            f"{overseas_count(squad)}/8"
+            f"Owner: {team['owner'] or 'Available'}"
         )
 
-        if squad:
+        overseas = sum(
+            1 for p in squad
+            if p["country"] != "India"
+        )
 
-            for p in squad:
+        st.write(
+            f"🌍 Overseas: {overseas}/8"
+        )
 
-                st.write(
-                    f"• {p['name']} — "
-                    f"{p['role']}"
-                )
+        for p in squad:
+
+            st.write(
+                f"• {p['name']} — "
+                f"{p['role']}"
+            )
 
 # ============================================================
 # AUTO REFRESH
