@@ -369,7 +369,23 @@ def overseas_count(squad):
     )
 
 
-def can_buy(team, player):     squad = team["squad"] or []      if len(squad) >= MAX_SQUAD:         return False      if isinstance(player, list):         country = player[4]         base_price = float(player[2])     else:         country = player.get("country", "India")         base_price = float(player.get("base", 0))      if country != "India" and overseas_count(squad) >= MAX_OVERSEAS:         return False      return float(team["purse"]) >= base_price(team, player):
+def can_buy(team, player):
+    squad = team["squad"] or []
+
+    if len(squad) >= MAX_SQUAD:
+        return False
+
+    if isinstance(player, list):
+        country = player[4]
+        base_price = float(player[2])
+    else:
+        country = player.get("country", "India")
+        base_price = float(player.get("base", 0))
+
+    if country != "India" and overseas_count(squad) >= MAX_OVERSEAS:
+        return False
+
+    return float(team["purse"]) >= base_price
 
     squad = team["squad"] or []
 
