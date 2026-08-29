@@ -401,23 +401,6 @@ def can_buy(team, player):
     return team["purse"] >= player["base"]
 
 
-def place_bid(room_code, username):
-
-    room = get_room(room_code)
-    team = user_team(room_code, username)
-
-    if not room or not team:
-        return
-
-    player = room["current_player"]
-
-    if not player:
-        return
-
-    if room["highest_bidder"] == team["team_name"]:
-        return
-
-    if not can_buy(team, player):
         update_room(
             room_code,
             {
@@ -426,34 +409,18 @@ def place_bid(room_code, username):
         )
         return
 
-    current = float(room["current_bid"])
 
-    if current < 10:
-        increment = 1
-    else:
-        increment = 2
+def place_bid(room_code, username):
 
-    new_bid = current + increment
+    room = get_room(room_code)
+    team = user_team(room_code, username)
 
-    if new_bid > float(team["purse"]):
-        update_room(
-            room_code,
-            {
-                "message": "❌ Not enough purse."
-            }
-        )
-        return
-
-    update_room(
-        room_code,
-        {
-            "current_bid": new_bid,
-            "highest_bidder": team["team_name"],
-            "message": f"🔥 {team['team_name']} bids ₹{new_bid} Cr!"
-        }
-    )
+    # ...new code...
 
 
+def sell_player(room_code):
+
+    room = get_room(room_code)
 def sell_player(room_code):
 
     room = get_room(room_code)
