@@ -399,9 +399,8 @@ def can_buy(team, player):
         return False
 
     return team["purse"] >= player["base"]
-
-
-        def place_bid(room_code, username):
+    
+def place_bid(room_code, username):
     room = get_room(room_code)
     team = user_team(room_code, username)
 
